@@ -1,0 +1,289 @@
+           ||  kernal drriver suspicious check  ||
+           --------------------------------------
+
+
+$events = Get-WinEvent -FilterHashtable @{
+    LogName = 'System'
+    Id      = 7045, 219, 7000, 7001
+} -MaxEvents 300 -ErrorAction SilentlyContinue
+
+foreach ($e in $events) {
+    $msg = $e.Message
+
+    if ($msg -match '\.sys' -or
+        $msg -match '(?i)kernel.*driver|driver.*kernel|failed to load|blocked|unsigned') {
+
+        Write-Host "`n[SUSPICIOUS KERNEL DRIVER]" -ForegroundColor Red
+        Write-Host "Time: $($e.TimeCreated)" -ForegroundColor Red
+        Write-Host $msg -ForegroundColor Red
+    }
+}
+
+
+
+
+
+
+               ---------------------------
+
+
+
+$drivers = Get-CimInstance Win32_SystemDriver | Where-Object State -eq "Running"
+
+foreach ($d in $drivers) {
+    $path = $d.PathName -replace '"',''
+    $suspicious = $false
+    $reason = @()
+
+    if ($path -and (Test-Path $path)) {
+        $sig = Get-AuthenticodeSignature $path
+
+        if ($sig.Status -ne "Valid") {
+            $suspicious = $true
+            $reason += "Invalid/Unsigned"
+        }
+
+        if ($path -match "\\Temp\\|\\AppData\\|\\Downloads\\|\\Users\\Public\\") {
+            $suspicious = $true
+            $reason += "Unusual Path"
+        }
+    }
+
+    if ($suspicious) {
+        Write-Host "[SUSPICIOUS] $($d.Name) | $path | $($reason -join ', ')" -ForegroundColor Red
+    }
+}
+
+
+
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
+
+
+
+                             ||  loaded kernel-mode drivers  ||
+                              -------------------------------
+
+
+
+
+Get-CimInstance Win32_SystemDriver |
+Where-Object State -eq "Running" |
+ForEach-Object {
+    Write-Host "[KERNEL] $($_.Name)  $($_.PathName)"
+}
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
+
+
+
+
+                   ||  deleted suspicious pw methoad  ||
+                     ---------------------------------
+
+
+
+
+$events = Get-WinEvent -FilterHashtable @{
+    LogName='System'
+    Id=7045,219,7000,7001
+} -MaxEvents 1000 -ErrorAction SilentlyContinue
+
+foreach ($e in $events) {
+    $m = $e.Message
+
+    if ($m -match '(?i)\.sys|driver|kernel') {
+        $match = [regex]::Match($m, '(?i)[A-Za-z]:\\[^"]+\.sys')
+
+        if ($match.Success -and -not (Test-Path $match.Value)) {
+            Write-Host "`n[SUSPICIOUS - DRIVER FILE MISSING/DELETED]" -ForegroundColor Red
+            Write-Host "Time : $($e.TimeCreated)" -ForegroundColor Red
+            Write-Host "File : $($match.Value)" -ForegroundColor Red
+            Write-Host $m -ForegroundColor Red
+        }
+    }
+}
+
+
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+          ||  suspicious driver, unsigned component, Code Integrity event power shall methoad  ||
+          ---------------------------------------------------------------------------------------
+
+
+
+
+# ==============================
+# ATHEX PC CHECKER - DEFENSIVE
+# Run PowerShell as Administrator
+# ==============================
+
+$found = $false
+
+function Suspicious($title, $detail) {
+    $script:found = $true
+    Write-Host "`n[SUSPICIOUS] $title" -ForegroundColor Red
+    Write-Host $detail -ForegroundColor Red
+}
+
+# 1. Running kernel drivers
+Get-CimInstance Win32_SystemDriver |
+Where-Object State -eq "Running" |
+ForEach-Object {
+
+    $name = $_.Name
+    $path = $_.PathName -replace '"',''
+
+    if ($path -and (Test-Path $path)) {
+        $sig = Get-AuthenticodeSignature $path
+
+        if ($sig.Status -ne "Valid") {
+            Suspicious "Driver: $name" "Path: $path | Signature: $($sig.Status)"
+        }
+
+        if ($path -match '(?i)\\Temp\\|\\AppData\\|\\Downloads\\|\\Users\\Public\\') {
+            Suspicious "Driver: $name" "Unusual path: $path"
+        }
+    }
+}
+
+# 2. Suspicious process locations / signatures
+Get-Process |
+ForEach-Object {
+    try {
+        $p = $_
+        $path = $p.Path
+
+        if ($path) {
+            $sig = Get-AuthenticodeSignature $path
+
+            if ($sig.Status -ne "Valid") {
+                Suspicious "Process: $($p.ProcessName) PID=$($p.Id)" `
+                    "Signature: $($sig.Status) | Path: $path"
+            }
+
+            if ($path -match '(?i)\\Temp\\|\\AppData\\Local\\Temp\\|\\Downloads\\|\\Users\\Public\\') {
+                Suspicious "Process: $($p.ProcessName) PID=$($p.Id)" `
+                    "Unusual path: $path"
+            }
+        }
+    } catch {}
+}
+
+# 3. Code Integrity events
+Get-WinEvent -FilterHashtable @{
+    LogName = 'Microsoft-Windows-CodeIntegrity/Operational'
+} -MaxEvents 300 -ErrorAction SilentlyContinue |
+Where-Object {
+    $_.Message -match '(?i)blocked|unsigned|failed|violation|code integrity'
+} |
+ForEach-Object {
+    Suspicious "Code Integrity Event" `
+        "Time: $($_.TimeCreated)`n$($_.Message)"
+}
+
+# 4. Recent driver/service installation events
+Get-WinEvent -FilterHashtable @{
+    LogName = 'System'
+    Id      = 7045
+} -MaxEvents 100 -ErrorAction SilentlyContinue |
+ForEach-Object {
+    if ($_.Message -match '(?i)\.sys|driver|kernel') {
+        Suspicious "Recent Driver Installation" `
+            "Time: $($_.TimeCreated)`n$($_.Message)"
+    }
+}
+
+if (-not $found) {
+    Write-Host "`n[OK] No suspicious indicators found." -ForegroundColor Green
+}
+
+
+
+
+
+
+
+
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+                   ||   Windows Event Viewer suspicious event  ||
+                     ------------------------------------------
+
+
+
+Get-WinEvent -FilterHashtable @{
+    LogName='System'
+    Id=7045,219,7000,7001
+} -MaxEvents 500 -ErrorAction SilentlyContinue |
+Where-Object {
+    $_.Message -match '(?i)driver|\.sys|kernel|failed|blocked|unsigned|service'
+} |
+ForEach-Object {
+    Write-Host "`n[SUSPICIOUS EVENT]" -ForegroundColor Red
+    Write-Host "Time : $($_.TimeCreated)" -ForegroundColor Red
+    Write-Host "ID   : $($_.Id)" -ForegroundColor Red
+    Write-Host $_.Message -ForegroundColor Red
+}
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+             ||  Code Integrity log code-injection–related indicators  ||
+               --------------------------------------------------------
+
+
+Get-WinEvent -FilterHashtable @{
+    LogName = 'Microsoft-Windows-CodeIntegrity/Operational'
+} -MaxEvents 1000 -ErrorAction SilentlyContinue |
+Where-Object {
+    $_.Message -match '(?i)injection|inject|code integrity violation|blocked|unsigned image|image.*blocked|executable.*blocked'
+} |
+ForEach-Object {
+    Write-Host "`n[CODE-INJECTION INDICATOR]" -ForegroundColor Red
+    Write-Host "Time : $($_.TimeCreated)" -ForegroundColor Red
+    Write-Host "ID   : $($_.Id)" -ForegroundColor Red
+    Write-Host $_.Message -ForegroundColor Red
+}
+
+
+
+
+-------------------------------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------------------------------
